@@ -26,8 +26,7 @@ typedef enum {
 
 #define WIFI_LOADER_DEV              "/dev/wmtWifi"
 #define WIFI_NVRAM_PATH              "/mnt/vendor/nvdata/APCFG/APRDEB"
-#define WIFI_NVRAM_INI_FILE          "/data/vendor/nvramwifi"
-#define WIFI_MACADDR_FILE            "/data/vendor/macwifi"
+#define WIFI_MACADDR_FILE            "/usr/lib/furios/device/wifimac"
 
 #define FILE_REMOVE_MASK (IN_DELETE_SELF | IN_MOVE_SELF)
 #define FILE_MODIFY_MASK IN_MODIFY
@@ -47,42 +46,6 @@ extern volatile gint wmt_shutdown_flag;
  */
 int
 wmt_set_state(WiFiState state);
-
-/**
- * Write data to the WMT WiFi driver device.
- *
- * @param data    Pointer to data buffer to write.
- * @param length  Length of data to write in bytes.
- * @return        Number of bytes written on success, -1 on failure.
- */
-int
-write_data_to_driver(char *data, size_t length);
-
-/**
- * Get custom MAC address from configuration file.
- *
- * @param mac  Buffer to store MAC address (6 bytes).
- * @return     1 on success, 0 on failure.
- */
-int
-get_custom_mac_address(char mac[]);
-
-/**
- * Write NVRAM data to the WiFi driver.
- *
- * @param filename  Path to NVRAM file to read and write.
- * @return          Number of bytes written on success, -1 on failure.
- */
-int
-write_nvram(char *filename);
-
-/**
- * Get custom NVRAM filename from configuration.
- *
- * @param filename  Buffer containing base path, will be appended with filename.
- */
-void
-get_custom_nvram_file_name(char *filename);
 
 /**
  * Start the WMT monitoring loop.

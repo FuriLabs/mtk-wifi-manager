@@ -64,6 +64,38 @@ restart_systemd_service(const char *service_name)
     return ret;
 }
 
+static int
+write_data_to_driver(char *data, size_t length)
+{
+    int ret = -1;
+    int fd = -1;
+
+    g_debug("Writing %zu bytes to driver", length);
+
+    if (!data || !length) {
+        g_debug("Invalid input - data=%p, length=%zu", (void*)data, length);
+        return ret;
+    }
+
+    g_debug("Opening device: %s", WIFI_LOADER_DEV);
+    fd = open(WIFI_LOADER_DEV, O_RDWR);
+    if (fd == -1) {
+        g_debug("Can't open device node(%s), error: %s", WIFI_LOADER_DEV, strerror(errno));
+        return ret;
+    }
+
+    /* write data to kernel */
+    ret = write(fd, data, length);
+
+    if (ret < 0)
+        g_debug("Write failed, error: %s", strerror(errno));
+    else
+        g_debug("Successfully wrote %d bytes", ret);
+
+    close(fd);
+    return ret;
+}
+
 int
 wmt_set_state(WiFiState state)
 {
@@ -130,72 +162,222 @@ wmt_set_state(WiFiState state)
     return 0;
 }
 
-int
-write_data_to_driver(char *data, size_t length)
+static gboolean
+is_valid_mac(const unsigned char mac[6])
 {
-    int ret = -1;
-    int fd = -1;
+    gboolean all_zero = TRUE;
+    gboolean all_ff = TRUE;
 
-    g_debug("Writing %zu bytes to driver", length);
-
-    if (!data || !length) {
-        g_debug("Invalid input - data=%p, length=%zu", (void*)data, length);
-        return ret;
+    for (int i = 0; i < 6; i++) {
+        if (mac[i] != 0x00)
+            all_zero = FALSE;
+        if (mac[i] != 0xff)
+            all_ff = FALSE;
     }
 
-    g_debug("Opening device: %s", WIFI_LOADER_DEV);
-    fd = open(WIFI_LOADER_DEV, O_RDWR);
-    if (fd == -1) {
-        g_debug("Can't open device node(%s), error: %s", WIFI_LOADER_DEV, strerror(errno));
-        return ret;
-    }
+    if (all_zero || all_ff)
+        return FALSE;
 
-    /* write data to kernel */
-    ret = write(fd, data, length);
+    if (mac[0] & 0x01)
+        return FALSE;
 
-    if (ret < 0)
-        g_debug("Write failed, error: %s", strerror(errno));
-    else
-        g_debug("Successfully wrote %d bytes", ret);
-
-    close(fd);
-    return ret;
+    return TRUE;
 }
 
-int
-get_custom_mac_address(char mac[])
+static gboolean
+parse_mac_string(const char *str, unsigned char mac[6])
 {
-    int fd = -1;
-    char buf[BUF_SIZE] = {0};
-    int read_len = 0, i = 0;
-    int ret_val = 1;
+    unsigned int values[6];
 
-    memset(buf, 0, BUF_SIZE);
-    fd = open(WIFI_MACADDR_FILE, O_RDONLY);
-    if (fd == -1) {
-        g_debug("Unable to access mac file");
+    if (!str)
+        return FALSE;
+
+    if (sscanf(str, "%02x:%02x:%02x:%02x:%02x:%02x",
+               &values[0], &values[1], &values[2],
+               &values[3], &values[4], &values[5]) != 6)
+        return FALSE;
+
+    for (int i = 0; i < 6; i++)
+        mac[i] = values[i] & 0xff;
+
+    return is_valid_mac(mac);
+}
+
+static void
+mac_to_string(const unsigned char mac[6], char out[18])
+{
+    snprintf(out, 18, "%02X:%02X:%02X:%02X:%02X:%02X",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+}
+
+static gboolean
+read_mac_from_file(const char *path, unsigned char mac[6])
+{
+    int fd;
+    char buf[64] = {0};
+    ssize_t len;
+
+    fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return FALSE;
+
+    len = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+
+    if (len <= 0)
+        return FALSE;
+
+    buf[len] = '\0';
+
+    return parse_mac_string(buf, mac);
+}
+
+static gboolean
+write_mac_to_file(const char *path, const unsigned char mac[6])
+{
+    int fd;
+    char buf[18];
+
+    mkdir("/usr/lib/furios", 0755);
+    mkdir("/usr/lib/furios/device", 0755);
+
+    mac_to_string(mac, buf);
+
+    fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0)
+        return FALSE;
+
+    if (write(fd, buf, strlen(buf)) != (ssize_t)strlen(buf)) {
+        close(fd);
+        return FALSE;
+    }
+
+    write(fd, "\n", 1);
+    fsync(fd);
+    close(fd);
+
+    return TRUE;
+}
+
+static gboolean
+read_mac_from_nvram_file(const char *filename, unsigned char mac[6])
+{
+    int fd;
+
+    fd = open(filename, O_RDONLY);
+    if (fd < 0)
+        return FALSE;
+
+    if (lseek(fd, NVRAM_MAC_ADDRESS_OFFSET, SEEK_SET) < 0) {
+        close(fd);
+        return FALSE;
+    }
+
+    if (read(fd, mac, 6) != 6) {
+        close(fd);
+        return FALSE;
+    }
+
+    close(fd);
+
+    return is_valid_mac(mac);
+}
+
+static gboolean
+write_mac_to_nvram_file(const char *filename, const unsigned char mac[6])
+{
+    int fd;
+
+    fd = open(filename, O_RDWR);
+    if (fd < 0)
+        return FALSE;
+
+    if (lseek(fd, NVRAM_MAC_ADDRESS_OFFSET, SEEK_SET) < 0) {
+        close(fd);
+        return FALSE;
+    }
+
+    if (write(fd, mac, 6) != 6) {
+        close(fd);
+        return FALSE;
+    }
+
+    fsync(fd);
+    close(fd);
+
+    return TRUE;
+}
+
+static gboolean
+generate_valid_mac(unsigned char mac[6])
+{
+    int fd;
+
+    fd = open("/dev/urandom", O_RDONLY);
+    if (fd < 0)
+        return FALSE;
+
+    if (read(fd, mac, 6) != 6) {
+        close(fd);
+        return FALSE;
+    }
+
+    close(fd);
+
+    mac[0] = (mac[0] & 0xfe) | 0x02;
+
+    return is_valid_mac(mac);
+}
+
+static int
+get_custom_mac_address(char mac[], const char *nvram_filename)
+{
+    unsigned char tmp[6];
+    char mac_str[18];
+
+    memset(tmp, 0, sizeof(tmp));
+
+    if (read_mac_from_nvram_file(nvram_filename, tmp)) {
+        mac_to_string(tmp, mac_str);
+        g_debug("Valid MAC found in NVRAM: %s", mac_str);
+
+        memcpy(mac, tmp, 6);
+
+        if (!read_mac_from_file(WIFI_MACADDR_FILE, tmp))
+            write_mac_to_file(WIFI_MACADDR_FILE, (unsigned char *)mac);
+
+        return 1;
+    }
+
+    g_debug("NVRAM MAC is empty or invalid");
+
+    if (read_mac_from_file(WIFI_MACADDR_FILE, tmp)) {
+        mac_to_string(tmp, mac_str);
+        g_debug("Using persisted WiFi MAC: %s", mac_str);
+
+        memcpy(mac, tmp, 6);
+        write_mac_to_nvram_file(nvram_filename, tmp);
+
+        return 1;
+    }
+
+    g_debug("No valid persisted WiFi MAC found, generating new one");
+
+    if (!generate_valid_mac(tmp))
         return 0;
-    }
 
-    read_len = read(fd, buf, BUF_SIZE - 1);
-    if (read_len >= 17) {
-        g_debug("MAC ADDR = %s", buf);
-        for (i = 0; i < 17; i++)
-            if (buf[i] == ':')
-                buf[i] = 0;
-        for (i = 0; i < 6; i++) {
-            mac[i] = strtol(&buf[i * 3], NULL, 16);
-            g_debug("mac[%d] = %x", i, mac[i]);
-        }
-    } else {
-        ret_val = 0;
-    }
+    mac_to_string(tmp, mac_str);
+    g_debug("Generated WiFi MAC: %s", mac_str);
 
-    close(fd);
-    return ret_val;
+    memcpy(mac, tmp, 6);
+
+    write_mac_to_file(WIFI_MACADDR_FILE, tmp);
+    write_mac_to_nvram_file(nvram_filename, tmp);
+
+    return 1;
 }
 
-int
+static int
 write_nvram(char *filename)
 {
     int ret = -1;
@@ -261,7 +443,7 @@ write_nvram(char *filename)
         return ret;
     }
 
-    if (get_custom_mac_address(mac)) {
+    if (get_custom_mac_address(mac, filename)) {
         g_debug("Successfully got MAC address, copying to NVRAM buffer");
         memcpy(acnvram + 12 + NVRAM_MAC_ADDRESS_OFFSET, mac, sizeof(mac));
     } else {
@@ -287,35 +469,14 @@ write_nvram(char *filename)
     return ret;
 }
 
-void
+static void
 get_custom_nvram_file_name(char *filename)
 {
-    int fd = -1;
-    char buf[BUF_SIZE] = {0};
-    int read_len = 0;
     size_t remaining_space;
 
-    memset(buf, 0, BUF_SIZE);
-    fd = open(WIFI_NVRAM_INI_FILE, O_RDONLY);
-    if (fd == -1) {
-        remaining_space = BUF_SIZE - strlen(filename);
-        if (remaining_space > 4)
-            strcat(filename, "WIFI");
-    } else {
-        read_len = read(fd, buf, BUF_SIZE - 1);
-        if (read_len > 0 && read_len < BUF_SIZE - 1) {
-            buf[read_len] = 0;
-            remaining_space = BUF_SIZE - strlen(filename);
-            if (remaining_space > read_len)
-                strcat(filename, buf);
-        } else {
-            remaining_space = BUF_SIZE - strlen(filename);
-            if (remaining_space > 4)
-                strcat(filename, "WIFI");
-        }
-
-        close(fd);
-    }
+    remaining_space = BUF_SIZE - strlen(filename);
+    if (remaining_space > 4)
+        strcat(filename, "WIFI");
 
     g_debug("Custom NVRAM filename = %s", filename);
 }
